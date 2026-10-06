@@ -23,11 +23,12 @@ T = TypeVar("T")
 
 
 def tf_minutes(tf: str) -> int:
-    """'1m' -> 1, '5m' -> 5, '15m' -> 15. Must divide 60 so bars align to the clock."""
-    m = re.fullmatch(r"(\d+)m", tf)
-    if not m or int(m.group(1)) < 1 or 60 % int(m.group(1)):
-        raise ValueError(f"timeframe must look like '1m', '5m', '15m' (minutes dividing 60), got {tf!r}")
-    return int(m.group(1))
+    """'1m' -> 1, '5m' -> 5, '15m' -> 15, '1h' -> 60. Minutes must divide 60, or be whole hours."""
+    m = re.fullmatch(r"(\d+)(m|h)", tf)
+    minutes = int(m.group(1)) * (60 if m.group(2) == "h" else 1) if m else 0
+    if minutes < 1 or (minutes < 60 and 60 % minutes) or (minutes >= 60 and minutes % 60):
+        raise ValueError(f"timeframe must look like '1m', '5m', '15m', '1h', got {tf!r}")
+    return minutes
 
 
 def resample_bars(bars: pd.DataFrame, tf: str, complete_only: bool = True) -> pd.DataFrame:

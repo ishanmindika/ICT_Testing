@@ -9,3 +9,4 @@ ict_lab/data/clean/*
 !ict_lab/data/clean/.gitkeep
 ict_lab/runs/*
 !ict_lab/runs/.gitkeep
+ict_lab/analysis/charts/

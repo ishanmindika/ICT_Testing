@@ -36,3 +36,15 @@ Detectors run on the back-adjusted 1m frame; thresholds are points / ATR multipl
 - `detect_swings(bars, SwingParams(n=3, timeframe, strict))`: N-bar fractals with confirmation time and first wick-sweep / close-through.
 - Sweep a range with `param_grid(FVGParams(), timeframe=["1m","5m","15m"], min_size_points=[0,1,2])`.
 No look-ahead: every record has `available_at` (close of the confirming bar); tests verify prefix-invariance.
+
+### Layer 2 continued: sweeps, displacement, MSS, bias, charts
+`compute_features(bars, FeatureConfig())` runs everything (`configs/features.yaml`, load with `load_feature_config`).
+- `level_table`: every level with `active_from`, `expires` (session levels) and `swept_ts`; active until swept.
+- `detect_sweeps`: trade-through by >= `min_penetration_ticks`, close back within `k` bars; level types selectable.
+- `detect_displacement`: ATR multiple (1.0/1.5/2.0/3.0...) or top-X% of window ranges; optional run of N bars.
+- `detect_mss`: break of the latest swing opposite the sweep; `close`|`wick`, `at_sweep`|`latest` reference.
+- `htf_bias`: `none | prior_day_oc | trend_swing | daily_ma_slope | perfect`. **`perfect` is look-ahead**: it warns
+  (`LookaheadWarning`) and is labelled `perfect(LOOKAHEAD)` with `bias_lookahead=True` in every output.
+- `tests/test_no_lookahead.py` runs every detector on full vs truncated data and requires identical results.
+- Charts (unadjusted candles, features detected on back-adjusted and shifted onto the same axis):
+  `python -m ict_lab.analysis.charts ES --n 15 --killzone killzone_ny_am --seed 7` -> `ict_lab/analysis/charts/`.

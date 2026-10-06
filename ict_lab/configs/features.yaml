@@ -18,3 +18,34 @@ swing:
 levels:
   killzones: [killzone_london, killzone_ny_am, killzone_ny_pm]
   pre_window_start: "18:00"
+sweep:
+  level_types: [prior_session, prior_rth, pre_london, pre_ny_am, pre_ny_pm, swing]
+  k: 3                     # bars allowed to close back (the breach bar counts when allow_same_bar)
+  min_penetration_ticks: 1.0
+  tick_size: 0.25
+  allow_same_bar: true
+  timeframe: 1m
+displacement:
+  timeframe: 1m
+  method: atr              # atr | percentile
+  atr_mult: 1.5            # test 1.0 / 1.5 / 2.0 / 3.0
+  atr_period: 14
+  top_pct: 5.0             # percentile method: top X% of window ranges ...
+  lookback: 200            # ... over this many prior windows
+  run_length: 1
+  min_body_atr_mult: 0.0
+mss:
+  timeframe: 1m
+  break_mode: close        # close | wick
+  reference: at_sweep      # at_sweep | latest
+  max_bars: 30
+  min_break_points: 0.0
+  swing: {timeframe: 1m, n: 3, strict: true}
+bias:
+  method: none             # none | prior_day_oc | trend_swing | daily_ma_slope | perfect (LOOK-AHEAD)
+  daily_basis: session     # session | rth
+  min_move_points: 0.0
+  trend_timeframe: 1h      # 15m | 1h
+  trend_swing_n: 2
+  ma_period: 20
+  perfect_window: killzone_ny_am

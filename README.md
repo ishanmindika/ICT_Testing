@@ -48,3 +48,15 @@ No look-ahead: every record has `available_at` (close of the confirming bar); te
 - `tests/test_no_lookahead.py` runs every detector on full vs truncated data and requires identical results.
 - Charts (unadjusted candles, features detected on back-adjusted and shifted onto the same axis):
   `python -m ict_lab.analysis.charts ES --n 15 --killzone killzone_ny_am --seed 7` -> `ict_lab/analysis/charts/`.
+
+## Layer 3: signals + execution (`ict_lab/engine`)
+- `FeatureStore` caches every detector stream by its parameters (memory + parquet): a new variant computes only its own stream.
+- `build_signals`: per session x killzone window, eligibility -> bias gate -> sweep -> [MSS] -> [displacement] -> every
+  direction-matching FVG after a qualifying chain. First failing stage is logged.
+- `run_backtest`: limit entry (fills only on trade-through), swing/distal/fixed stops, R / next-opposing-liquidity / time targets,
+  hard exit, stop-first on ambiguous bars (`ambiguous_bar`), tick-grid fills (integer ticks, conservative rounding),
+  costs gross + net, `max_trades_per_window` 1 or unlimited (cap 10), several windows per config, no overlapping positions.
+- Named configs: `configs/grid.json` (`as_taught_5m`, `as_taught_1m`, `as_traded`).
+- Run: `python -m ict_lab.engine.runner as_traded NQ 2024-03-01 2024-03-31`
+- Hand-check: `python -m ict_lab.analysis.handcheck NQ 2024-03-01 2024-03-31 --configs as_traded as_taught_5m`
+- Frequency diagnostic (counts and reasons only, never PnL): `python -m ict_lab.analysis.diagnostics NQ`

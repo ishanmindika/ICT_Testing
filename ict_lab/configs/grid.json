@@ -1,0 +1,65 @@
+{
+  "_note": "Named configurations. Definitions are locked before the first parameter sweep; change them here only deliberately.",
+  "configs": {
+    "as_taught_5m": {
+      "signal": {
+        "windows": ["london", "ny_am", "ny_pm"],
+        "fvg": {"timeframe": "5m", "min_size_points": 0.0},
+        "bias": {"method": "trend_swing", "trend_timeframe": "15m", "trend_swing_n": 2},
+        "sweep_required": true,
+        "sweep_universe": "bsl_ssl_15m",
+        "sweep_k": 3,
+        "sweep_min_penetration_ticks": 1.0,
+        "mss_required": false,
+        "displacement_atr_mult": 1.5
+      },
+      "exec": {
+        "entry": "mid",
+        "stop": "swing",
+        "target": "liquidity",
+        "fallback_r": 2.0,
+        "max_trades_per_window": 1
+      }
+    },
+    "as_taught_1m": {
+      "signal": {
+        "windows": ["london", "ny_am", "ny_pm"],
+        "fvg": {"timeframe": "1m", "min_size_points": 0.0},
+        "bias": {"method": "trend_swing", "trend_timeframe": "15m", "trend_swing_n": 2},
+        "sweep_required": true,
+        "sweep_universe": "bsl_ssl_15m",
+        "sweep_k": 3,
+        "sweep_min_penetration_ticks": 1.0,
+        "mss_required": false,
+        "displacement_atr_mult": 1.5
+      },
+      "exec": {
+        "entry": "mid",
+        "stop": "swing",
+        "target": "liquidity",
+        "fallback_r": 2.0,
+        "max_trades_per_window": 1
+      }
+    },
+    "as_traded": {
+      "signal": {
+        "windows": ["london", "ny_am", "ny_pm"],
+        "fvg": {"timeframe": "1m", "min_size_points": 0.0},
+        "bias": {"method": "none"},
+        "sweep_required": true,
+        "sweep_universe": "session_refs_plus_swings",
+        "sweep_k": 3,
+        "sweep_min_penetration_ticks": 1.0,
+        "mss_required": false,
+        "displacement_atr_mult": 1.5
+      },
+      "exec": {
+        "entry": "mid",
+        "stop": "swing",
+        "target": "r",
+        "target_r": 2.0,
+        "max_trades_per_window": "unlimited"
+      }
+    }
+  }
+}

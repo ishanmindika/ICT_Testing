@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+# purchased vendor data and derived output stay local
+ict_lab/data/raw/*
+ict_lab/data/clean/*
+!ict_lab/data/raw/.gitkeep
+!ict_lab/data/clean/.gitkeep
+ict_lab/runs/*
+!ict_lab/runs/.gitkeep

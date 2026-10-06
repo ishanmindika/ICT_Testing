@@ -1,0 +1,27 @@
+# Data-layer config. Edit `source` to match your vendor's files.
+source:
+  glob: "*.csv*"            # files under ict_lab/data/raw (csv, csv.gz, parquet)
+  tz: "UTC"                 # zone of NAIVE timestamps in the raw files (e.g. America/New_York)
+  epoch_unit: "ns"          # used only if the timestamp column is numeric
+  columns:                  # canonical name -> list of accepted raw names (first match wins)
+    timestamp: [ts_event, timestamp, datetime, time, date_time]
+    open: [open, o]
+    high: [high, h]
+    low: [low, l]
+    close: [close, c]
+    volume: [volume, vol, v]
+    symbol: [symbol, contract, raw_symbol]
+  # If the file splits date and time into two columns, name them here:
+  date_column: null
+  time_column: null
+
+# Root symbols -> instrument spec. Raw contract symbols (ESZ4, ESH5) are matched by prefix.
+instruments:
+  ES: {tick_size: 0.25, point_value: 50.0}
+  NQ: {tick_size: 0.25, point_value: 20.0}
+  MES: {tick_size: 0.25, point_value: 5.0}
+  MNQ: {tick_size: 0.25, point_value: 2.0}
+
+clean:
+  max_gap_minutes: 5        # in-session gaps longer than this are reported
+  roll: volume              # "volume" = front contract is prior session's highest-volume one

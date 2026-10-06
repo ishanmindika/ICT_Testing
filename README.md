@@ -26,3 +26,13 @@ and the quality report never inspects it.
 
 ## Rules
 No price ratios or percentages anywhere (points, ticks, R only); `tests/test_no_ratios.py` enforces it.
+
+## Feature layer (`ict_lab/features`)
+Detectors run on the back-adjusted 1m frame; thresholds are points / ATR multiples. Defaults in `configs/features.yaml`.
+- `detect_fvgs(bars, FVGParams(timeframe, min_size_points, min_size_atr_mult, ...))`: top/bottom/mid/size/ATR multiple,
+  `bar_idx`, `available_at`, and first touch / 50% / full fill (index + timestamp).
+- `session_levels(bars, LevelParams())`: per-bar prior session / prior RTH / pre-window (session open -> killzone start)
+  highs and lows plus `swept_*` flags.
+- `detect_swings(bars, SwingParams(n=3, timeframe, strict))`: N-bar fractals with confirmation time and first wick-sweep / close-through.
+- Sweep a range with `param_grid(FVGParams(), timeframe=["1m","5m","15m"], min_size_points=[0,1,2])`.
+No look-ahead: every record has `available_at` (close of the confirming bar); tests verify prefix-invariance.

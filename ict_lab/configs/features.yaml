@@ -1,0 +1,20 @@
+# Defaults for feature detectors. Use as FVGParams(**cfg["fvg"]) etc., or sweep with
+# ict_lab.features.param_grid(FVGParams(), timeframe=["1m", "5m", "15m"], min_size_points=[0, 1, 2]).
+# All thresholds are in points (or multiples of ATR, which is in points). Never percentages.
+fvg:
+  timeframe: 1m
+  min_size_points: 0.0
+  min_size_atr_mult: 0.0
+  atr_period: 14
+  atr_method: wilder       # wilder | sma
+  atr_ref: bar3            # bar3 | bar2
+  require_contiguous: true
+  expire_bars: null
+swing:
+  timeframe: 1m
+  n: 3
+  strict: true
+  require_contiguous: true
+levels:
+  killzones: [killzone_london, killzone_ny_am, killzone_ny_pm]
+  pre_window_start: "18:00"

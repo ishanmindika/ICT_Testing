@@ -1,161 +1,239 @@
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 import yaml
-from pathlib import Path
 
 from ict_lab.data import build as build_mod
-from ict_lab.data.cleaner import clean, drop_invalid, find_gaps
-from ict_lab.data.loader import read_raw
-from ict_lab.data.sessions import in_session_mask, session_date
-from ict_lab.data.store import load_bars, resample
+from ict_lab.data.quality import missing_minutes_by_year
+from ict_lab.data.sessions import add_session_columns, in_session_mask, session_date
+from ict_lab.data.show import window
+from ict_lab.data.store import holdout_cutoff, load_bars, load_rolls, resample
 
 CFG = yaml.safe_load((Path(__file__).parents[1] / "configs" / "data.yaml").read_text())
 
 
-def bars(start, periods, symbol=None, base=5000.0, vol=100):
-    idx = pd.date_range(start, periods=periods, freq="1min", tz="UTC", name="ts")
-    close = base + np.arange(periods) * 0.25
-    df = pd.DataFrame({"open": close - 0.25, "high": close + 0.5, "low": close - 0.5,
-                       "close": close, "volume": vol}, index=idx)
-    if symbol:
-        df["symbol"] = symbol
+def utc(*times):
+    return pd.DatetimeIndex(times, tz="UTC")
+
+
+def flags(*times):
+    df = add_session_columns(pd.DataFrame(index=utc(*times)))
     return df
 
 
+# ---------------- sessions / DST ----------------
+
 def test_session_date_rolls_at_1800_et():
-    # Sun 2024-01-07 23:00 UTC = 18:00 ET -> Monday's session; 22:59 UTC = 17:59 ET -> Sunday (closed)
-    idx = pd.DatetimeIndex(["2024-01-07 23:00", "2024-01-08 15:00"], tz="UTC")
-    assert list(session_date(idx).dt.strftime("%Y-%m-%d")) == ["2024-01-08", "2024-01-08"]
+    idx = utc("2024-01-07 22:59", "2024-01-07 23:00", "2024-01-08 21:59", "2024-01-08 22:00")
+    # 17:59 ET Sun (closed, same date), 18:00 ET Sun -> Mon, 16:59 ET Mon, 17:00 ET Mon (break, still Mon)
+    assert list(session_date(idx).dt.strftime("%m-%d")) == ["01-07", "01-08", "01-08", "01-08"]
+
+
+def test_spring_forward_2024_03_10():
+    # Sunday open is 18:00 EDT = 22:00 UTC (not 23:00): session belongs to Monday 03-11
+    idx = utc("2024-03-10 21:59", "2024-03-10 22:00")
+    assert list(session_date(idx).dt.strftime("%m-%d")) == ["03-10", "03-11"]
+    # 09:30 ET is 14:30 UTC on Fri 03-08 (EST) but 13:30 UTC on Mon 03-11 (EDT)
+    df = flags("2024-03-08 14:29", "2024-03-08 14:30", "2024-03-11 13:29", "2024-03-11 13:30", "2024-03-11 14:30")
+    assert list(df["rth"]) == [False, True, False, True, True]
+    # NY AM killzone 10:00 ET
+    k = flags("2024-03-08 14:59", "2024-03-08 15:00", "2024-03-11 13:59", "2024-03-11 14:00", "2024-03-11 15:00")
+    assert list(k["killzone_ny_am"]) == [False, True, False, True, False]
+
+
+def test_fall_back_2024_11_03():
+    # Sunday open is 18:00 EST = 23:00 UTC: Monday 11-04 session
+    idx = utc("2024-11-03 22:59", "2024-11-03 23:00")
+    assert list(session_date(idx).dt.strftime("%m-%d")) == ["11-03", "11-04"]
+    # 09:30 ET is 13:30 UTC on Fri 11-01 (EDT) but 14:30 UTC on Mon 11-04 (EST)
+    df = flags("2024-11-01 13:29", "2024-11-01 13:30", "2024-11-04 14:29", "2024-11-04 14:30", "2024-11-04 13:30")
+    assert list(df["rth"]) == [False, True, False, True, False]
+    # London killzone 03:00-04:00 ET: 07:00 UTC in EDT, 08:00 UTC in EST
+    lk = flags("2024-11-01 06:59", "2024-11-01 07:00", "2024-11-04 07:00", "2024-11-04 08:00", "2024-11-04 09:00")
+    assert list(lk["killzone_london"]) == [False, True, False, True, False]
+    # NY PM 14:00-15:00 ET
+    pm = flags("2024-11-04 18:59", "2024-11-04 19:00", "2024-11-04 19:59", "2024-11-04 20:00")
+    assert list(pm["killzone_ny_pm"]) == [False, True, True, False]
+
+
+def test_window_edges_half_open():
+    df = flags("2024-06-03 13:59", "2024-06-03 14:00", "2024-06-03 14:59", "2024-06-03 15:00")  # EDT
+    assert list(df["killzone_ny_am"]) == [False, True, True, False]
+    assert list(flags("2024-06-03 19:59", "2024-06-03 20:00")["rth"]) == [True, False]  # 15:59 / 16:00 ET
 
 
 def test_session_mask_handles_dst():
-    # 17:30 ET is the daily break in both winter (22:30 UTC) and summer (21:30 UTC)
-    idx = pd.DatetimeIndex(["2024-01-09 22:30", "2024-07-09 21:30", "2024-07-09 22:30"], tz="UTC")
+    idx = utc("2024-01-09 22:30", "2024-07-09 21:30", "2024-07-09 22:30")  # 17:30 ET break in both seasons
     assert list(in_session_mask(idx)) == [False, False, True]
 
 
-def test_naive_timestamps_localized_and_dst_ambiguity_dropped(tmp_path):
-    # 2024-11-03 01:30 occurs twice in New York; naive values can't be resolved -> dropped and counted
-    f = tmp_path / "x.csv"
-    f.write_text("timestamp,open,high,low,close,volume\n"
-                 "2024-11-02 09:30:00,1,2,1,2,10\n2024-11-03 01:30:00,1,2,1,2,10\n")
-    df, stats = read_raw(f, {**CFG["source"], "tz": "America/New_York"})
-    assert len(df) == 1 and df.index[0] == pd.Timestamp("2024-11-02 13:30", tz="UTC")
-    assert stats["bad_timestamps"] == 1
+def test_no_missing_minutes_across_dst_days():
+    for start in ("2024-03-10 22:00", "2024-11-03 23:00"):  # Sunday open
+        idx = pd.date_range(start, periods=60 * 22, freq="1min", tz="UTC")
+        sd = session_date(idx)
+        assert missing_minutes_by_year(idx, sd) == {}
 
 
-def test_epoch_ns_and_alt_column_names(tmp_path):
-    f = tmp_path / "x.csv"
-    ns = pd.Timestamp("2024-03-01 15:00", tz="UTC").value
-    f.write_text(f"ts_event,Open,High,Low,Close,Vol\n{ns},1,2,1,2,10\n")
-    df, _ = read_raw(f, CFG["source"])
-    assert df.index[0] == pd.Timestamp("2024-03-01 15:00", tz="UTC") and df["volume"].iloc[0] == 10
+# ---------------- synthetic triplets ----------------
+
+def bars(start, periods, contract, base):
+    idx = pd.date_range(start, periods=periods, freq="1min", tz="UTC", name="ts")
+    close = base + np.arange(periods) * 0.25
+    return pd.DataFrame({"open": close - 0.25, "high": close + 0.5, "low": close - 0.5,
+                         "close": close, "volume": 100, "contract": contract}, index=idx)
 
 
-def test_invalid_rows_removed_and_counted():
-    df = bars("2024-03-04 15:00", 4)
-    df.iloc[0, df.columns.get_loc("high")] = df.iloc[0]["low"] - 1  # high < low
-    df.iloc[1, df.columns.get_loc("close")] = np.nan
-    df.iloc[2, df.columns.get_loc("volume")] = -5
-    out, rep = drop_invalid(df)
-    assert len(out) == 1 and rep["dropped_nan"] == 1 and rep["dropped_ohlc_inconsistent"] == 1
-
-
-def test_duplicates_keep_highest_volume():
-    df = bars("2024-03-04 15:00", 3)
-    dup = df.iloc[[1]].copy(); dup["volume"] = 999
-    out, rep, _, _ = clean(pd.concat([df, dup]).sort_index(ascending=False), "ES")
-    assert rep["dropped_duplicates"] == 1 and out.loc["2024-03-04 15:01", "volume"] == 999
-    assert out.index.is_monotonic_increasing
-
-
-def test_gaps_ignore_daily_break_and_weekend_but_flag_real_holes():
-    a = bars("2024-03-04 20:00", 30)          # Mon 15:00 ET
-    b = bars("2024-03-04 21:30", 10)          # +30min hole in-session
-    gaps = find_gaps(pd.concat([a, b]), 5)
-    assert len(gaps) == 1 and gaps["missing_minutes"].iloc[0] == 60
-    brk = pd.concat([bars("2024-03-04 21:55", 5), bars("2024-03-04 23:00", 5)])  # 16:55 ET .. 18:00 ET
-    assert len(find_gaps(brk, 5)) == 0
-    wk = pd.concat([bars("2024-03-08 21:55", 5), bars("2024-03-10 22:00", 5)])   # Fri close -> Sun 18:00 EDT open (DST day)
-    assert len(find_gaps(wk, 5)) == 0
-
-
-def test_front_month_uses_prior_session_volume_no_lookahead():
-    days = pd.date_range("2024-03-04 15:00", periods=4, freq="1D", tz="UTC")
-    parts = []
-    for i, d in enumerate(days):
-        old_vol, new_vol = (1000, 10) if i < 2 else (10, 1000)   # new contract out-trades from day 3 (idx 2)
-        parts += [bars(d, 3, "ESH4", 5000, old_vol), bars(d, 3, "ESM4", 5050, new_vol)]
-    out, rep, _, rolls = clean(pd.concat(parts), "ES")
-    held = out.groupby("session_date")["symbol"].first().tolist()
-    # volume flips on day idx 2, but we only know that after the day -> switch on idx 3
-    assert held == ["ESH4", "ESH4", "ESH4", "ESM4"]
-    assert len(rolls) == 1 and rolls["to_contract"].iloc[0] == "ESM4"
-
-
-def test_end_to_end_build_and_load(tmp_path):
-    raw_dir, out_dir = tmp_path / "raw", tmp_path / "clean"
-    raw_dir.mkdir()
-    es = bars("2024-03-04 14:30", 120, "ESH4")
-    nq = bars("2024-03-04 14:30", 120, "NQH4", base=18000)
-    pd.concat([es, nq]).reset_index().rename(columns={"ts": "timestamp"}).to_csv(raw_dir / "a.csv", index=False)
-    reports = build_mod.build(CFG, raw_dir, out_dir)
-    assert set(reports) == {"ES", "NQ"}
-    df = load_bars("ES", "2024-03-04 15:00", clean_dir=out_dir)
-    assert df.index.tz is not None and df.index.min() == pd.Timestamp("2024-03-04 15:00", tz="UTC")
-    r5 = resample(df, "5min")
-    assert len(r5) == 18 and r5["volume"].iloc[0] == 500
-    assert r5["high"].iloc[0] == df["high"].iloc[:5].max()
-
-
-# ---- unadjusted / back-adjusted / rolls triplet ----
-
-def make_triplet(raw_dir, root="ES", adj_roll=-30.0, break_adj=False, shift_adj_ts=False):
-    h4 = bars("2024-03-04 15:00", 60, "ESH4", 5000)
-    m4 = bars("2024-03-05 15:00", 60, "ESM4", 5030)
-    un = pd.concat([h4, m4])
+def make_triplet(raw_dir, root="ES", adj=-30.0, shift_adj_ts=False, csv_adj=None, bump_close=False):
+    """Mon 03-04 on ESH4, Tue 03-05 (roll day) onward on ESM4; plus a late 2025 day so a holdout exists."""
+    parts = [bars("2024-03-04 14:00", 90, "ESH4", 5000), bars("2024-03-05 14:00", 90, "ESM4", 5030),
+             bars("2025-06-10 14:00", 90, "ESU5", 6000)]
+    un = pd.concat(parts)
     ba = un.copy()
-    ba.loc[ba["symbol"] == "ESH4", ["open", "high", "low", "close"]] += adj_roll   # old contract shifted
-    if break_adj:
-        ba.iloc[5, ba.columns.get_loc("close")] -= 0.1  # offset no longer constant within the run
-    un = un.rename(columns={"symbol": "contract"})
-    ba = ba.rename(columns={"symbol": "contract"})
+    ba.loc[ba["contract"] == "ESH4", PRICE] += adj
+    if bump_close:
+        ba.iloc[5, ba.columns.get_loc("close")] -= 0.1
     if shift_adj_ts:
         ba.index = ba.index + pd.Timedelta(minutes=1)
     un.to_parquet(raw_dir / f"{root}_1m_unadjusted.parquet")
     ba.to_parquet(raw_dir / f"{root}_1m_backadjusted.parquet")
     pd.DataFrame({"date": ["2024-03-05"], "old_contract": ["ESH4"], "new_contract": ["ESM4"],
-                  "adjustment": [adj_roll]}).to_csv(raw_dir / f"{root}_rolls.csv", index=False)
+                  "adjustment": [csv_adj if csv_adj is not None else adj]}).to_csv(raw_dir / f"{root}_rolls.csv", index=False)
 
 
-def test_triplet_merges_and_matches_rolls(tmp_path):
+PRICE = ["open", "high", "low", "close"]
+
+
+@pytest.fixture
+def built(tmp_path):
+    raw, out = tmp_path / "raw", tmp_path / "clean"
+    raw.mkdir()
+    make_triplet(raw)
+    cfg = {**CFG, "instruments": {"ES": CFG["instruments"]["ES"]},
+           "holdout": {"cutoff_date": "2025-01-01", "years": 2}}
+    reports = build_mod.build(cfg, raw, out)
+    return cfg, raw, out, reports
+
+
+def kw(built):
+    cfg, _, out, _ = built
+    return dict(clean_dir=out, config=cfg)
+
+
+def test_default_is_backadjusted_and_unadjusted_option(built):
+    b = load_bars("ES", **kw(built))
+    u = load_bars("ES", price_series="unadjusted", **kw(built))
+    assert b.index.equals(u.index) and (b["volume"] == u["volume"]).all() and (b["contract"] == u["contract"]).all()
+    h4 = b["contract"] == "ESH4"
+    assert (u.loc[h4, "close"] - b.loc[h4, "close"] == 30.0).all()
+    assert (u.loc[~h4, "close"] == b.loc[~h4, "close"]).all()
+    with pytest.raises(ValueError):
+        load_bars("ES", price_series="nope", **kw(built))
+
+
+def test_is_roll_day_on_both_series_and_roll_log(built):
+    for s in ("backadjusted", "unadjusted"):
+        df = load_bars("ES", price_series=s, **kw(built))
+        rd = df.groupby("session_date")["is_roll_day"].all()
+        assert rd.to_dict() == {pd.Timestamp("2024-03-04"): False, pd.Timestamp("2024-03-05"): True}
+    log = load_rolls("ES", clean_dir=built[2], config=built[0])
+    assert list(log["new_contract"]) == ["ESM4"] and log["adjustment"].iloc[0] == -30.0
+
+
+def test_holdout_excluded_by_default_and_requires_override(built):
+    df = load_bars("ES", **kw(built))
+    assert df["session_date"].max() < pd.Timestamp("2025-01-01")
+    full = load_bars("ES", include_holdout=True, **kw(built))
+    assert full["session_date"].max() == pd.Timestamp("2025-06-10") and len(full) == len(df) + 90
+    # even an explicit date range cannot reach it
+    assert load_bars("ES", start="2025-06-01", **kw(built)).empty
+    assert load_rolls("ES", clean_dir=built[2], config=built[0], include_holdout=True).shape[0] == 1
+
+
+def test_holdout_unknown_cutoff_fails_loudly(tmp_path):
+    with pytest.raises(RuntimeError):
+        holdout_cutoff(tmp_path, {"holdout": {"cutoff_date": None}})
+
+
+def test_auto_cutoff_recorded_in_meta(tmp_path):
     raw, out = tmp_path / "raw", tmp_path / "clean"; raw.mkdir()
-    make_triplet(raw); make_triplet(raw, "NQ")
-    reports = build_mod.build(CFG, raw, out)
-    assert set(reports) == {"ES", "NQ"} and reports["ES"]["roll_findings"] == []
-    df = load_bars("ES", clean_dir=out)
-    assert len(df) == 120
-    old = df[df["contract"] == "ESH4"]
-    assert (old["offset"] == 30.0).all() and (df[df["contract"] == "ESM4"]["offset"] == 0).all()
-    assert df.loc[df.index[0], "close"] != df.loc[df.index[0], "adj_close"]  # both price sets kept
+    make_triplet(raw)
+    cfg = {**CFG, "instruments": {"ES": CFG["instruments"]["ES"]}, "holdout": {"cutoff_date": None, "years": 1}}
+    build_mod.build(cfg, raw, out)
+    assert json.loads((out / "meta.json").read_text())["holdout_cutoff"] == "2024-06-10"
+    assert holdout_cutoff(out, cfg) == pd.Timestamp("2024-06-10")
+    assert load_bars("ES", clean_dir=out, config=cfg)["session_date"].max() == pd.Timestamp("2024-03-05")
 
 
-def test_triplet_rejects_misaligned_timestamps(tmp_path):
+def test_cache_partitioned_by_symbol_series_year(built):
+    base = built[2] / "bars"
+    for s in ("backadjusted", "unadjusted"):
+        years = sorted(p.name for p in (base / "symbol=ES" / f"series={s}").iterdir())
+        assert years == ["year=2024", "year=2025"]
+
+
+def test_build_reports_and_saves_quality(built):
+    rep = built[3]["ES"]
+    assert rep["holdout_rows_excluded"] == 90
+    assert rep["date_range"]["end"].startswith("2024-03-05")        # holdout not in the range
+    assert rep["roll_days_by_year"] == {"2024": 1} and rep["roll_findings"] == []
+    assert rep["backadjusted_close_by_year"]["2024"]["cumulative_adjustment_max"] == 30.0
+    assert rep["duplicate_timestamps"] == 0 and rep["zero_volume_bars"] == 0
+    assert (built[2] / "quality" / "ES.json").exists() and (built[2] / "quality" / "ES.txt").exists()
+    # 2024-03-04 and -05 are present, so no weekday gaps between them
+    assert rep["missing_trading_days"] == []
+
+
+def test_alignment_failure_is_loud(tmp_path):
     make_triplet(tmp_path, shift_adj_ts=True)
-    with pytest.raises(ValueError, match="timestamps differ"):
-        build_mod.build(CFG, tmp_path, tmp_path / "c")
+    cfg = {**CFG, "instruments": {"ES": CFG["instruments"]["ES"]}}
+    with pytest.raises(AssertionError, match="timestamp index differs"):
+        build_mod.build(cfg, tmp_path, tmp_path / "c")
 
 
-def test_triplet_reports_roll_adjustment_mismatch(tmp_path):
+def test_roll_mismatch_and_non_additive_reported(tmp_path):
+    make_triplet(tmp_path, csv_adj=-12.5, bump_close=True)
+    cfg = {**CFG, "instruments": {"ES": CFG["instruments"]["ES"]}, "holdout": {"cutoff_date": "2025-01-01", "years": 2}}
+    f = build_mod.build(cfg, tmp_path, tmp_path / "c")["ES"]["roll_findings"]
+    assert any("adjustment at" in x for x in f) and any("not constant" in x for x in f)
+
+
+def test_quality_counts_bad_and_duplicate_rows(tmp_path):
     make_triplet(tmp_path)
-    r = pd.read_csv(tmp_path / "ES_rolls.csv"); r["adjustment"] = -12.5
-    r.to_csv(tmp_path / "ES_rolls.csv", index=False)
-    rep = build_mod.build(CFG, tmp_path, tmp_path / "c")["ES"]
-    assert any("adjustment" in f for f in rep["roll_findings"])
+    for name in ("unadjusted", "backadjusted"):
+        p = tmp_path / f"ES_1m_{name}.parquet"
+        df = pd.read_parquet(p)
+        df.iloc[3, df.columns.get_loc("volume")] = 0
+        df.iloc[7, df.columns.get_loc("high")] = df.iloc[7]["low"] - 1          # high < low
+        df = pd.concat([df, df.iloc[[10]]])                                       # duplicate timestamp
+        df.to_parquet(p)
+    cfg = {**CFG, "instruments": {"ES": CFG["instruments"]["ES"]}, "holdout": {"cutoff_date": "2025-01-01", "years": 2}}
+    r = build_mod.build(cfg, tmp_path, tmp_path / "c")["ES"]
+    assert r["duplicate_timestamps"] == 1 and r["zero_volume_bars"] == 1
+    assert r["bad_ohlc"]["unadjusted"]["high_lt_low"] == 1
+    assert r["rows"]["raw"] - r["rows"]["clean"] == 2  # bad row + duplicate removed
 
 
-def test_triplet_flags_non_constant_offset(tmp_path):
-    make_triplet(tmp_path, break_adj=True)
-    rep = build_mod.build(CFG, tmp_path, tmp_path / "c")["ES"]
-    assert any("not constant" in f for f in rep["roll_findings"])
+def test_verification_window_et_and_holdout_guard(built):
+    cfg, raw, out, _ = built
+    w = window("ES", "2024-03-04 09:00", "2024-03-04 09:02", "unadjusted", raw_dir=raw, clean_dir=out, config=cfg)
+    assert len(w) == 3 and str(w.index[0].tz) == "America/New_York" and w.index[0].hour == 9
+    assert w["close"].iloc[0] == 5000.0                    # 09:00 EST == 14:00 UTC == first bar
+    with pytest.raises(PermissionError):
+        window("ES", "2025-06-10 10:00", "2025-06-10 10:05", raw_dir=raw, clean_dir=out, config=cfg)
+    assert len(window("ES", "2025-06-10 10:00", "2025-06-10 10:05", include_holdout=True, raw_dir=raw, clean_dir=out, config=cfg)) == 6
+
+
+def test_resample(built):
+    df = load_bars("ES", **kw(built))
+    r = resample(df, "5min")
+    assert r["volume"].iloc[0] == 500 and r["high"].iloc[0] == df["high"].iloc[:5].max()
+
+
+def test_empty_development_data_is_an_error(tmp_path):
+    make_triplet(tmp_path)
+    cfg = {**CFG, "instruments": {"ES": CFG["instruments"]["ES"]}, "holdout": {"cutoff_date": "2020-01-01", "years": 2}}
+    with pytest.raises(ValueError, match="no development data"):
+        build_mod.build(cfg, tmp_path, tmp_path / "c")

@@ -2,24 +2,27 @@
 
 ```
 ict_lab/
-  data/raw/     your purchased 1-minute bars (gitignored)
-  data/clean/   cleaned parquet + manifest/gaps/rolls (gitignored)
-  data/         loader.py · cleaner.py · sessions.py · store.py · build.py
+  data/raw/      {ROOT}_1m_unadjusted.parquet, {ROOT}_1m_backadjusted.parquet, {ROOT}_rolls.csv (gitignored)
+  data/clean/    bars/symbol=ES/series=backadjusted/year=2021/*.parquet, rolls/, quality/, meta.json (gitignored)
+  data/          continuous.py quality.py sessions.py store.py build.py show.py loader.py
   configs/data.yaml
   features/ engine/ runs/ analysis/   (next steps)
 ```
 
 ## Data layer
-1. Drop vendor files in `ict_lab/data/raw/` and edit `ict_lab/configs/data.yaml` (`source.tz`, column names).
-2. `pip install -e .[dev]` then `python -m ict_lab.data.build`
-3. In code: `from ict_lab.data.store import load_bars, resample; load_bars("ES", "2024-01-01")`
+1. Put the six files in `ict_lab/data/raw/`; check `configs/data.yaml` (`source.tz`, column names, instruments).
+2. `pip install -e .[dev]`, then `python -m ict_lab.data.build` (prints and saves the quality report to `data/clean/quality/`).
+3. Load: `load_bars("ES")` is **back-adjusted** (strategy logic); `load_bars("ES", price_series="unadjusted")` is for charts.
+   `load_rolls("ES")` is the roll log; `is_roll_day` is on both series.
+4. Verify against a chart (window is ET): `python -m ict_lab.data.show ES "2024-03-08 09:30" "2024-03-08 10:00" --series unadjusted`
 
-Guarantees: UTC index; invalid/duplicate bars dropped and counted; front-month chosen from the *prior*
-session's volume (no look-ahead), prices unadjusted; gaps are reported, never filled; `session_date`
-follows the CME 18:00 ET session. Each output has a `*.manifest.json` with the full quality report.
+Columns: open high low close volume contract session_date rth killzone_london killzone_ny_am killzone_ny_pm is_roll_day.
+Timestamps are UTC bar-open times; windows are ET wall-clock, half-open `[start, end)`.
 
-### Pre-built triplets (`{ROOT}_1m_unadjusted.parquet`, `{ROOT}_1m_backadjusted.parquet`, `{ROOT}_rolls.csv`)
-`build` detects these automatically. Output per root in `data/clean/`: `{ROOT}_1m.parquet` with real prices in
-`open/high/low/close`, back-adjusted in `adj_*`, plus `offset`, `contract`, `session_date`; `{ROOT}_1m.rolls.parquet`;
-manifest. The two files must match exactly on timestamps, volume and contract (else the build fails); `rolls.csv`
-is cross-checked against the price files and any disagreement is listed as `roll_findings` in the manifest.
+## Holdout
+`holdout.cutoff_date` in the config (first held-out `session_date`). If unset, the build uses last session - 2 years and
+tells you to pin it. Every loader (`load_bars`, `load_rolls`, `show`) excludes the holdout unless `include_holdout=True`,
+and the quality report never inspects it.
+
+## Rules
+No price ratios or percentages anywhere (points, ticks, R only); `tests/test_no_ratios.py` enforces it.

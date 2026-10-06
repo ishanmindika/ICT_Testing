@@ -1,70 +1,66 @@
-"""Build cleaned parquet from raw vendor files:  python -m ict_lab.data.build [--config PATH]"""
+"""Build the cache from raw triplets:  python -m ict_lab.data.build [--config PATH]"""
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
-import yaml
+import pandas as pd
 
 from . import continuous
-from .cleaner import clean, find_gaps
-from .loader import read_raw_dir
-from .sessions import in_session_mask
-from .store import CLEAN_DIR, LAB, RAW_DIR, save_clean
+from .quality import format_report, quality_report, save_report
+from .sessions import add_session_columns
+from .store import CLEAN_DIR, CONFIG_PATH, RAW_DIR, load_config, split_holdout, write_cache, write_meta, write_rolls
 
 
 def build(config: dict, raw_dir: Path = RAW_DIR, out_dir: Path = CLEAN_DIR) -> dict[str, dict]:
-    triplets = {r: continuous.file_paths(r, raw_dir) for r in config["instruments"]}
-    triplets = [r for r, p in triplets.items() if all(f.exists() for f in p.values())]
-    if triplets:
-        return build_continuous(config, triplets, raw_dir, out_dir)
-    raw, file_stats = read_raw_dir(raw_dir, config["source"])
-    roots = sorted(config["instruments"], key=len, reverse=True)  # MES before ES
-    if "symbol" in raw.columns:
-        sym = raw["symbol"].astype(str)
-        claimed = sym.map(lambda x: next((r for r in roots if x.startswith(r)), None))
-        parts = {r: raw[claimed == r] for r in roots if (claimed == r).any()}
+    loaded = {}
+    for root in config["instruments"]:
+        if not all(p.exists() for p in continuous.file_paths(root, raw_dir).values()):
+            continue
+        merged, rolls = continuous.read_triplet(root, raw_dir, config["source"])
+        loaded[root] = (add_session_columns(merged), rolls)
+    if not loaded:
+        raise FileNotFoundError(f"no complete {{ROOT}}_1m_unadjusted/_1m_backadjusted/_rolls set in {raw_dir}")
+
+    pinned = (config.get("holdout") or {}).get("cutoff_date")
+    if pinned:
+        cutoff, source = pd.Timestamp(pinned).normalize(), "config"
     else:
-        if len(roots) != 1:
-            raise ValueError("raw files have no symbol column; configure exactly one instrument")
-        parts = {roots[0]: raw}
+        last = max(m["session_date"].max() for m, _ in loaded.values())
+        cutoff = (last - pd.DateOffset(years=config["holdout"]["years"])).normalize()
+        source = "auto"
+        print(f"holdout cutoff not pinned; using {cutoff:%Y-%m-%d} (last session - {config['holdout']['years']}y). "
+              f"Pin it with holdout.cutoff_date in configs/data.yaml.")
+    write_meta(out_dir, cutoff, source)
 
     reports = {}
-    for root, frame in parts.items():
-        c = config["clean"]
-        df, report, gaps, rolls = clean(frame, root, c["max_gap_minutes"], c["roll"])
-        report["files"] = file_stats
-        save_clean(df, root, report, gaps, rolls, out_dir)
-        reports[root] = report
-        print(f"{root}: {report['rows_out']:,} bars {report['start'][:10]}..{report['end'][:10]} "
-              f"| dropped {report['rows_in'] - report['rows_out']:,} | gaps {report['gap_count']} "
-              f"({report['gap_minutes']:,} min) | rolls {report.get('rolls', 0)}")
-    return reports
+    for root, (raw, rolls) in loaded.items():
+        clean = continuous.clean_merged(raw)
+        clean = add_session_columns(clean.drop(columns="session_date", errors="ignore"))
+        # Full-history cache (the holdout is written but excluded by every loader by default).
+        for series, frame in continuous.finalize(clean, rolls).items():
+            write_cache(root, series, frame, out_dir)
+        write_rolls(root, rolls, out_dir)
 
-
-def build_continuous(config: dict, roots: list[str], raw_dir: Path, out_dir: Path) -> dict[str, dict]:
-    reports = {}
-    for root in roots:
-        df, report = continuous.load_triplet(root, raw_dir, config["source"])
-        rolls = report.pop("rolls")
-        gaps = find_gaps(df, config["clean"]["max_gap_minutes"])
-        report.update(gap_count=len(gaps), gap_minutes=int(gaps["missing_minutes"].sum()) if len(gaps) else 0,
-                      out_of_session_bars=int((~in_session_mask(df.index)).sum()))
-        save_clean(df, root, report, gaps, rolls, out_dir)
+        # Everything below inspects development data only.
+        raw_dev, _ = split_holdout(raw, cutoff)
+        clean_dev, clean_hold = split_holdout(clean, cutoff)
+        if clean_dev.empty:
+            raise ValueError(f"{root}: no development data before holdout cutoff {cutoff:%Y-%m-%d}")
+        rolls_dev = rolls[rolls["date"] < cutoff]
+        report = quality_report(root, raw_dev, clean_dev, rolls_dev, n_holdout_rows=len(clean_hold))
+        report["roll_findings"] = continuous.check_rolls(clean_dev, rolls_dev)
+        save_report(report, out_dir / "quality")
         reports[root] = report
-        print(f"{root}: {report['rows_out']:,} bars {report['start'][:10]}..{report['end'][:10]} "
-              f"| dropped {report['rows_unadjusted'] - report['rows_out']:,} | gaps {report['gap_count']} "
-              f"| rolls {report['roll_count']}")
-        for f in report["roll_findings"]:
-            print(f"  WARN {f}")
+        print(format_report(report) + "\n")
     return reports
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default=str(LAB / "configs" / "data.yaml"))
+    ap.add_argument("--config", default=str(CONFIG_PATH))
     args = ap.parse_args()
-    build(yaml.safe_load(Path(args.config).read_text()))
+    build(load_config(Path(args.config)))
 
 
 if __name__ == "__main__":

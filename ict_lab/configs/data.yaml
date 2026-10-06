@@ -15,13 +15,13 @@ source:
   date_column: null
   time_column: null
 
-# Root symbols -> instrument spec. Raw contract symbols (ESZ4, ESH5) are matched by prefix.
+# Roots to load: {ROOT}_1m_unadjusted.parquet, {ROOT}_1m_backadjusted.parquet, {ROOT}_rolls.csv
 instruments:
   ES: {tick_size: 0.25, point_value: 50.0}
   NQ: {tick_size: 0.25, point_value: 20.0}
   MES: {tick_size: 0.25, point_value: 5.0}
   MNQ: {tick_size: 0.25, point_value: 2.0}
 
-clean:
-  max_gap_minutes: 5        # in-session gaps longer than this are reported
-  roll: volume              # "volume" = front contract is prior session's highest-volume one
+holdout:
+  cutoff_date: null         # first session_date reserved as holdout, e.g. "2024-10-01". PIN THIS once chosen.
+  years: 2                  # when cutoff_date is null the build uses (last session - years) and tells you

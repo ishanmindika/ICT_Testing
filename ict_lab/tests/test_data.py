@@ -107,3 +107,55 @@ def test_end_to_end_build_and_load(tmp_path):
     r5 = resample(df, "5min")
     assert len(r5) == 18 and r5["volume"].iloc[0] == 500
     assert r5["high"].iloc[0] == df["high"].iloc[:5].max()
+
+
+# ---- unadjusted / back-adjusted / rolls triplet ----
+
+def make_triplet(raw_dir, root="ES", adj_roll=-30.0, break_adj=False, shift_adj_ts=False):
+    h4 = bars("2024-03-04 15:00", 60, "ESH4", 5000)
+    m4 = bars("2024-03-05 15:00", 60, "ESM4", 5030)
+    un = pd.concat([h4, m4])
+    ba = un.copy()
+    ba.loc[ba["symbol"] == "ESH4", ["open", "high", "low", "close"]] += adj_roll   # old contract shifted
+    if break_adj:
+        ba.iloc[5, ba.columns.get_loc("close")] -= 0.1  # offset no longer constant within the run
+    un = un.rename(columns={"symbol": "contract"})
+    ba = ba.rename(columns={"symbol": "contract"})
+    if shift_adj_ts:
+        ba.index = ba.index + pd.Timedelta(minutes=1)
+    un.to_parquet(raw_dir / f"{root}_1m_unadjusted.parquet")
+    ba.to_parquet(raw_dir / f"{root}_1m_backadjusted.parquet")
+    pd.DataFrame({"date": ["2024-03-05"], "old_contract": ["ESH4"], "new_contract": ["ESM4"],
+                  "adjustment": [adj_roll]}).to_csv(raw_dir / f"{root}_rolls.csv", index=False)
+
+
+def test_triplet_merges_and_matches_rolls(tmp_path):
+    raw, out = tmp_path / "raw", tmp_path / "clean"; raw.mkdir()
+    make_triplet(raw); make_triplet(raw, "NQ")
+    reports = build_mod.build(CFG, raw, out)
+    assert set(reports) == {"ES", "NQ"} and reports["ES"]["roll_findings"] == []
+    df = load_bars("ES", clean_dir=out)
+    assert len(df) == 120
+    old = df[df["contract"] == "ESH4"]
+    assert (old["offset"] == 30.0).all() and (df[df["contract"] == "ESM4"]["offset"] == 0).all()
+    assert df.loc[df.index[0], "close"] != df.loc[df.index[0], "adj_close"]  # both price sets kept
+
+
+def test_triplet_rejects_misaligned_timestamps(tmp_path):
+    make_triplet(tmp_path, shift_adj_ts=True)
+    with pytest.raises(ValueError, match="timestamps differ"):
+        build_mod.build(CFG, tmp_path, tmp_path / "c")
+
+
+def test_triplet_reports_roll_adjustment_mismatch(tmp_path):
+    make_triplet(tmp_path)
+    r = pd.read_csv(tmp_path / "ES_rolls.csv"); r["adjustment"] = -12.5
+    r.to_csv(tmp_path / "ES_rolls.csv", index=False)
+    rep = build_mod.build(CFG, tmp_path, tmp_path / "c")["ES"]
+    assert any("adjustment" in f for f in rep["roll_findings"])
+
+
+def test_triplet_flags_non_constant_offset(tmp_path):
+    make_triplet(tmp_path, break_adj=True)
+    rep = build_mod.build(CFG, tmp_path, tmp_path / "c")["ES"]
+    assert any("not constant" in f for f in rep["roll_findings"])

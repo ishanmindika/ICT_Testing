@@ -17,3 +17,9 @@ ict_lab/
 Guarantees: UTC index; invalid/duplicate bars dropped and counted; front-month chosen from the *prior*
 session's volume (no look-ahead), prices unadjusted; gaps are reported, never filled; `session_date`
 follows the CME 18:00 ET session. Each output has a `*.manifest.json` with the full quality report.
+
+### Pre-built triplets (`{ROOT}_1m_unadjusted.parquet`, `{ROOT}_1m_backadjusted.parquet`, `{ROOT}_rolls.csv`)
+`build` detects these automatically. Output per root in `data/clean/`: `{ROOT}_1m.parquet` with real prices in
+`open/high/low/close`, back-adjusted in `adj_*`, plus `offset`, `contract`, `session_date`; `{ROOT}_1m.rolls.parquet`;
+manifest. The two files must match exactly on timestamps, volume and contract (else the build fails); `rolls.csv`
+is cross-checked against the price files and any disagreement is listed as `roll_findings` in the manifest.
